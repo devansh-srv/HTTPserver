@@ -1,42 +1,94 @@
+use std::collections::HashMap;
 use std::error::Error;
-use std::io::prelude::*;
+use std::io::{self, prelude::*, Bytes};
 use std::net::{TcpListener, TcpStream};
-fn main() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("0.0.0.0:8080")?;
-    loop {
-        let tcp = TcpListener::accept(&listener);
-        match tcp {
-            Ok((mut stream, socket)) => {
-                println!("connection established over socket addr: {}", socket);
-                if handle_function(&mut stream) {
-                    handle_response_404(&mut stream)
-                } else {
-                    handle_response_200(&mut stream);
-                }
+use std::thread;
+use std::time::{self, Duration};
+
+//entities needed are defined below
+
+struct Server {
+    listener: TcpListener,
+}
+impl Server {
+    fn new(socket_address: &str) -> Self {
+        println!("Waiting for the client to connection");
+        //binding address, match and handle error
+
+        let listener = match TcpListener::bind(socket_address) {
+            Ok(connection) => connection,
+            Err(e) => {
+                eprintln!("cannot bind due to {}", e);
+                panic!(); //improve error handling
+            }
+        };
+        //return server instance
+        Server { listener }
+    }
+}
+#[allow(dead_code)]
+struct Client;
+enum HTTPmethods {
+    GET,
+    PUSH,
+    UPDATE,
+    DELETE,
+}
+struct Requests {
+    //versions, resources and methods
+    //todo : versions
+    method: HTTPmethods,
+    resource: String,
+    header: HashMap<String, Vec<String>>,
+    body: Vec<u8>,
+}
+impl Requests {
+    fn new(mut stream: &TcpStream) -> io::Result<Requests> {
+        let mut buffer: Vec<u8> = Vec::with_capacity(4096);
+        match stream.read(&mut buffer) {
+            //bytes read
+            Ok(bytes) => {
+                println!("Bytes read:{}", bytes);
+                let req = String::from_utf8_lossy(&buffer[..bytes]); //safer than other utf-8 <Cow>
+                println!("Req {}", req);
             }
             Err(e) => {
-                println!("Failed to establish connection due to error: {}", e);
+                print!("Unable to read request due to {}", e);
+            }
+        };
+
+        todo!()
+    }
+}
+
+#[allow(dead_code)]
+struct Responses;
+// #[allow(unused_mut)]
+// fn handle_response(mut stream: &TcpStream) {
+//     let response = "HTTP/1.0 200 OK \r\r\n\nHello World";
+//     let _res = stream.write(response.as_bytes()).unwrap();
+//     thread::sleep(Duration::from_secs(5));
+//     println!("bytes write: {}", _res);
+// }
+//
+fn main() {
+    let server: Server = Server::new("0.0.0.0:8080");
+    loop {
+        let tcp = TcpListener::accept(&server.listener);
+        match tcp {
+            Ok((mut stream, socket_address)) => {
+                println!(
+                    "connection established over socket addr: {}",
+                    socket_address
+                );
+                //handle_req
+            }
+            Err(e) => {
+                eprintln!("cannot connect due to {}", e);
                 break;
             }
         }
     }
-    Ok(())
-}
-
-fn handle_function(stream: &mut TcpStream) -> bool {
-    let mut buffer = [0; 512];
-    let _req = stream.read(&mut buffer).unwrap();
-    let req_str = String::from_utf8_lossy(&buffer);
-    req_str.contains("abcdefg")
-}
-
-#[allow(unused_mut)]
-fn handle_response_200(mut stream: &mut TcpStream) {
-    stream.write("HTTP/1.1 200 OK\r\n\r\nHello World!".as_bytes());
-}
-
-fn handle_response_404(stream: &mut TcpStream) {
-    stream.write("HTTP/1.1 404 Not Found\r\n\r\nFuck Off".as_bytes());
 }
 
 #[allow(dead_code)]
