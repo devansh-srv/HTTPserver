@@ -1,148 +1,177 @@
 use std::collections::HashMap;
-use std::error::Error;
-use std::io::{self, prelude::*, BufReader};
+use std::fs;
+use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::{self, Duration};
-
-//entities needed are defined below
-
-struct Server {
-    listener: TcpListener,
-}
-impl Server {
-    fn new(socket_address: &str) -> Self {
-        println!("Waiting for the client to connection");
-        //binding address, match and handle error
-
-        let listener = match TcpListener::bind(socket_address) {
-            Ok(connection) => connection,
-            Err(e) => {
-                eprintln!("cannot bind due to {}", e);
-                panic!(); //improve error handling
-            }
-        };
-        //return server instance
-        Server { listener }
-    }
-}
-#[allow(dead_code)]
-struct Client;
-#[derive(Debug)]
+type HEADERS = HashMap<String, Vec<String>>;
+//manage methods
 enum HTTPmethods {
     GET,
     POST,
     PUT,
     DELETE,
+    UNKNOWN, // for other methods
 }
-type HEADERS = HashMap<String, Vec<String>>;
-#[derive(Debug)]
-struct Requests {
-    //versions, resources and methods
-    //todo : versions
+struct Request {
     method: HTTPmethods,
     resource: String,
     headers: HEADERS,
     body: Vec<u8>,
 }
-fn read_line(stream: &mut BufReader<TcpStream>) -> io::Result<String> {
-    let mut buffer: Vec<u8> = Vec::with_capacity(4096);
-    //reade byte by byte
-    while let Some(Ok(byte)) = stream.bytes().next() {
-        if byte == b'\n' {
-            //reaches the end
-            if buffer.ends_with(b"\r") {
-                buffer.pop();
-            }
-            //error -h
-            let line: String = String::from_utf8(buffer).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "Not a valid HTTP header")
-            })?;
-            return Ok(line);
-        }
-        buffer.push(byte);
-    }
-    Err(io::Error::new(
-        io::ErrorKind::ConnectionAborted,
-        "Client aborted early",
-    ))
-}
-impl Requests {
-    fn new(stream: &mut BufReader<TcpStream>) -> io::Result<Requests> {
-        let http_metadata = read_line(stream)?;
-        eprintln!("{}", http_metadata);
-        let mut req_line = http_metadata.split_ascii_whitespace();
-        //method
-        let method = match req_line.next().unwrap() {
-            "GET" => HTTPmethods::GET,
-            "POST" => HTTPmethods::POST,
-            "PUT" => HTTPmethods::PUT,
-            "DELETE" => HTTPmethods::DELETE,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unsupported HTTP method",
-                ))
-            }
-        };
-        //resource
-        let resource = req_line.next().unwrap().to_string();
-        //version
-        let _version = req_line.next().unwrap();
-        //header
-        let mut headers = HEADERS::new();
-        loop {
-            let line = read_line(stream)?;
-            if line.is_empty() {
-                break;
-            }
-            let mut parts = line.split(":");
-            let name = parts.next().unwrap().to_string();
-            let value = parts.next().unwrap().to_string();
-            let slot_for_value = headers.entry(name).or_insert_with(|| Vec::with_capacity(1));
-            slot_for_value.push(value);
-        }
-        //body
-        let mut body = Vec::with_capacity(65536);
-        stream.read(&mut body);
 
-        Ok(Requests {
+struct Response {
+    status_line: String,
+    headers: HEADERS,
+    body: Vec<u8>,
+}
+
+impl Request {
+    fn new(method: HTTPmethods, resource: String, headers: HEADERS, body: Vec<u8>) -> Self {
+        Request {
             method,
             resource,
             headers,
             body,
-        })
-    }
-}
-
-#[allow(dead_code)]
-struct Responses;
-fn main() {
-    let server: Server = Server::new("0.0.0.0:8080");
-    for stream in server.listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                println!(
-                    "connected over socket address {}",
-                    stream.peer_addr().unwrap()
-                );
-                let mut request = BufReader::new(stream);
-                match Requests::new(&mut request) {
-                    Ok(request) => {
-                        println!("parsed reques {:?}", request);
-                    }
-                    Err(e) => eprintln!("failed to parse request {}", e),
-                }
-            }
-            Err(e) => {
-                eprintln!("could not connect due to {}", e);
-                break;
-            }
         }
     }
 }
 
-#[allow(dead_code)]
-fn data_type<T>(_: &T) {
-    println!("{:?}", std::any::type_name::<T>());
+impl Response {
+    fn new(status_line: String, content_type: &str, body: Vec<u8>) -> Self {
+        let mut headers: HEADERS = HEADERS::new();
+        headers.insert("Content-Type".to_string(), vec![body.len().to_string()]);
+        headers.insert("Content-Length".to_string(), vec![content_type.to_string()]);
+        headers.insert("Connection".to_string(), vec!["close".to_string()]);
+
+        Response {
+            status_line,
+            headers,
+            body,
+        }
+    }
+    fn send(&self, stream: &mut TcpStream) {
+        let response = format!(
+            "{}\r\n{}\r\n\r\n",
+            self.status_line,
+            self.headers
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v.join(", ")))
+                .collect::<Vec<String>>()
+                .join("\r\n")
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(&self.body).unwrap();
+        stream.flush().unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap(); // Close the connection
+    }
+}
+
+fn parse_request(stream: &mut TcpStream) -> Request {
+    let mut buffer = [0; 1024];
+    let bytes = stream.read(&mut buffer).unwrap();
+    //read in String
+    let request = String::from_utf8_lossy(&buffer[..bytes]);
+    //split with /r/n
+    let mut lines = request.lines();
+    let method_line = lines.next().unwrap_or("");
+    //read methods and resources
+    let (method, resource) = {
+        let parts: Vec<&str> = method_line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let method = match parts[0] {
+                "GET" => HTTPmethods::GET,
+                "POST" => HTTPmethods::POST,
+                _ => HTTPmethods::UNKNOWN,
+            };
+            let resource = parts[1];
+            (method, resource.to_string())
+        } else {
+            (HTTPmethods::UNKNOWN, "/".to_string())
+        }
+    };
+    let mut headers = HEADERS::new();
+    for line in lines {
+        if let Some((key, val)) = line.split_once(": ") {
+            headers
+                .entry(key.to_string())
+                .or_insert(vec![])
+                .push(val.to_string());
+        }
+    }
+    //return request
+    Request::new(method, resource, headers, vec![])
+}
+
+fn get_content_type(resource: &str) -> &str {
+    if resource.ends_with(".html") {
+        "text/html"
+    } else if resource.ends_with(".css") {
+        "text/css"
+    } else if resource.ends_with(".js") {
+        "application/javascript"
+    } else if resource.ends_with(".png") {
+        "image/png"
+    } else if resource.ends_with(".jpg") {
+        "image/jpeg"
+    } else if resource.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn get_file(resource: &str) -> Vec<u8> {
+    let path = format!("static{}", resource);
+    match fs::read(&path) {
+        Ok(file) => file,
+        Err(_) => {
+            eprintln!("failed to read: {}", path);
+            vec![]
+        }
+    }
+}
+
+fn get_response(request: &Request) -> Response {
+    match request.method {
+        HTTPmethods::GET => {
+            let resource = request.resource.as_str();
+            //get content_type
+            let content_type = get_content_type(resource);
+            //get content
+            let body = get_file(resource);
+            if body.is_empty() {
+                Response::new(
+                    "HTTP/1.1 404 Not Found".to_string(),
+                    "text/html",
+                    b"<h1> 404 Not Found".to_vec(),
+                )
+            } else {
+                Response::new("HTTP/1.1 200 OK".to_string(), content_type, body)
+            }
+        }
+        _ => Response::new(
+            "HTTP/1.1 405 Method Not allowed".to_string(),
+            "text/html",
+            b"<h1>Method not allowed</h1>".to_vec(),
+        ),
+    }
+}
+
+fn handle_client(mut stream: TcpStream) {
+    let request = parse_request(&mut stream); //get request parsed
+    let response = get_response(&request); //get_response
+    response.send(&mut stream); //send response
+}
+fn main() {
+    println!("Waiting for client to connect");
+    let listener: TcpListener = TcpListener::bind("0.0.0.0:8080").unwrap();
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                handle_client(stream);
+            }
+            Err(e) => {
+                eprintln!("Connection failed: {}", e);
+            }
+        }
+    }
 }
