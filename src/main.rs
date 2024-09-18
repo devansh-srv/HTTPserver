@@ -38,8 +38,8 @@ impl Request {
 impl Response {
     fn new(status_line: String, content_type: &str, body: Vec<u8>) -> Self {
         let mut headers: HEADERS = HEADERS::new();
-        headers.insert("Content-Type".to_string(), vec![body.len().to_string()]);
-        headers.insert("Content-Length".to_string(), vec![content_type.to_string()]);
+        headers.insert("Content-Type".to_string(), vec![content_type.to_string()]);
+        headers.insert("Content-Length".to_string(), vec![body.len().to_string()]);
         headers.insert("Connection".to_string(), vec!["close".to_string()]);
 
         Response {
